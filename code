@@ -1,0 +1,241 @@
+/*
+ * Li-Ion capacity tester.
+ * set up:
+ * 19.5 Ohm discharge load
+ * ~190mA discharge rate.
+ * I2C LCD.
+ * MOSFET for discharge control.
+ * 
+ * software from e-battle.blogspot.com
+ * 
+ */
+
+
+#include <Wire.h> 
+#include <LiquidCrystal_I2C.h>
+
+//LCD set-up
+
+LiquidCrystal_I2C lcd(0x27,20,4);  // set the LCD address to 0x27 for a 20 chars and 4 line lcd
+
+//a few icons
+
+/*byte heart[8] = {
+  0x00,
+  0x0a,
+  0x1f,
+  0x1f,
+  0x1f,
+  0x0e,
+  0x04,
+  0x00
+};
+
+byte smiley[8] = {
+  0x00,
+  0x00,
+  0x0a,
+  0x00,
+  0x00,
+  0x11,
+  0x0e,
+  0x00
+};
+
+byte hourglass[8] = {
+  0x1f,
+  0x11,
+  0x0e,
+  0x04,
+  0x04,
+  0x0e,
+  0x11,
+  0x1f  
+};
+
+byte diamond [8] = {
+  0x04,
+  0x0e,
+  0x11,
+  0x11,
+  0x11,
+  0x0e,
+  0x04,
+  0x00
+};
+
+byte bell [8] = {
+  0x04,
+  0x0e,
+  0x0e,
+  0x0e,
+  0x1f,
+  0x00,
+  0x04,
+  0x00
+};*/
+
+// definitions
+
+#define STATE_WAITING 0
+#define STATE_MEASURING 1
+#define STATE_MEASURING_ENDED 2
+#define BAT_LI 0
+#define BAT_NI 1
+#define BAT_UNREC 2
+#define BAT_LI_DISCHARGED 3
+
+//variables
+
+float vtgBatLoaded;
+float vtgBatUnloaded;
+float vtgLoad;
+float vtgDropOnLoad;
+float vtgDropRin;
+float rLoad=8.2; //resistanse of the load in Ohms
+float rIn;
+float batCurrent;
+float mAh;
+uint8_t FET_Base=7;
+uint8_t button = 6;
+uint8_t speaker= 5;
+uint8_t state=STATE_WAITING;
+float LiChargedVtg=4.35;
+float LiCutoffVtg=2.8;
+float NiChargedVtg=1.45;  
+float NiCutoffVtg=1.0;
+float cutoff;
+uint8_t BatteryType;
+boolean DischargeAllowed=false;
+String BatTypeString;
+
+void setup()
+{
+  pinMode(FET_Base,OUTPUT);
+  pinMode(button,INPUT);
+  pinMode(speaker,OUTPUT);
+  digitalWrite(FET_Base,LOW);
+  noTone(speaker);
+  lcd.init();
+  lcd.backlight();
+
+  /*lcd.createChar(0, heart);
+  lcd.createChar(1, smiley);
+  lcd.createChar(2, hourglass);
+  lcd.createChar(3, diamond);
+  lcd.createChar(4, bell);*/
+}
+
+void loop()
+{
+   if (state==STATE_MEASURING)
+   {
+  
+  vtgBatUnloaded=analogRead(0)*5.0/1024.0; //get the voltage of UNLOADED battery
+  
+  if (vtgBatUnloaded<cutoff)
+  {
+    state=STATE_MEASURING_ENDED;
+    DischargeAllowed=false;
+    for (uint8_t i=0;i<4;++i)
+    {tone(speaker,2000,500); delay(500);noTone(5);delay(300);}
+  }
+  digitalWrite(FET_Base,HIGH); //turn the MOSFET on
+  delay(1000);
+  vtgBatLoaded=analogRead(0)*5.0/1024.0;   //get the voltage of LOADED battery
+  vtgLoad=analogRead(1)*5.0/1024.0;
+  digitalWrite(FET_Base,LOW);//turn the MOSFET off
+  vtgDropOnLoad=vtgBatLoaded-vtgLoad;
+  if(vtgDropOnLoad>0) batCurrent=vtgDropOnLoad/rLoad;
+   else batCurrent=0;
+  vtgDropRin=vtgBatUnloaded-vtgBatLoaded;
+  if(batCurrent>0) rIn=vtgDropRin/batCurrent;
+  else rIn=0;
+  mAh+=batCurrent/3.6; //*1000.0/3600.0;
+  lcd.clear();
+  lcdState();
+    lcd.setCursor(0,0);
+    lcd.print(" Bat   Load    I ");
+  lcd.setCursor(0,1);
+  lcd.print(vtgBatUnloaded); lcd.print("V  ");lcd.print(vtgBatLoaded); lcd.print("V  ");lcd.print(batCurrent); lcd.print("A");
+  lcd.setCursor(0,2);
+  lcd.print("Rin= "); lcd.print(rIn); lcd.setCursor(11,2); lcd.print(" Ohm");
+  lcd.setCursor(0,3);
+  lcd.print("Cap= "); lcd.print(mAh); lcd.print(" mA/h"); 
+  delay(500);
+   } 
+   else if (state==STATE_WAITING)
+   {
+     digitalWrite(FET_Base,LOW);//turn the MOSFET off
+     vtgBatUnloaded=analogRead(0)*5.0/1024.0; //get the voltage of UNLOADED battery
+     DefBatteryType();
+     lcd.clear();
+     lcdState();
+     lcd.setCursor(0,0);
+     lcd.print("Bat= "); lcd.print(vtgBatUnloaded); lcd.print(" V");
+     lcd.setCursor(0,1);
+     lcd.print(BatTypeString);
+     lcd.setCursor(0,2);
+     lcd.print("Test ");
+     if (DischargeAllowed) lcd.print("allowed");
+     else lcd.print("not allowed");
+     CheckButtons();
+     delay(5000);
+   }
+   else if (state==STATE_MEASURING_ENDED)
+   {
+     digitalWrite(FET_Base,LOW);//turn the MOSFET off
+     vtgBatUnloaded=analogRead(0)*5.0/1024.0; //get the voltage of UNLOADED battery
+     lcd.clear();
+     lcdState();
+     lcd.setCursor(0,0);
+     lcd.print("Bat= "); lcd.print(vtgBatUnloaded); lcd.print(" V");
+     lcd.setCursor(0,1);
+     lcd.print("Cap= ");lcd.print(mAh); lcd.print(" mA/h");     
+     CheckButtons();
+     delay(500);
+   }
+}
+
+void CheckButtons(void) {
+   
+   if (digitalRead(button)==HIGH){
+    switch (state){
+      
+    case STATE_WAITING : DefBatteryType();
+    if (DischargeAllowed){ mAh=0; state=STATE_MEASURING;
+    tone(speaker,1000,500); delay(500);noTone(5);}
+    break;
+    
+    case STATE_MEASURING : state=STATE_MEASURING_ENDED;
+    break;
+    
+    case STATE_MEASURING_ENDED : state=STATE_WAITING;
+    break;
+   }
+ }
+ }
+
+
+void lcdState(void){
+   String stateString;
+   lcd.setCursor(0,0);
+   if(state==STATE_WAITING) stateString="Waiting       ";
+   if(state==STATE_MEASURING) stateString="Measuring     ";
+   if(state==STATE_MEASURING_ENDED) stateString="Measuring done";
+   lcd.print(stateString);
+   delay(5000);
+   lcd.clear();
+ }
+    
+void DefBatteryType(void){
+   
+       if (vtgBatUnloaded>LiCutoffVtg&&vtgBatUnloaded<LiChargedVtg)
+       {BatteryType=BAT_LI; DischargeAllowed=true;BatTypeString="Li-ion battery";cutoff=LiCutoffVtg;}
+       if (vtgBatUnloaded>NiCutoffVtg&&vtgBatUnloaded<NiChargedVtg)
+       {BatteryType=BAT_NI; DischargeAllowed=true;BatTypeString="Ni-MH battery ";cutoff=NiCutoffVtg;}
+       if (vtgBatUnloaded<LiCutoffVtg&&vtgBatUnloaded>NiChargedVtg)
+       {BatteryType=BAT_LI_DISCHARGED; DischargeAllowed=false;BatTypeString="Li-ion battery";}
+       if (vtgBatUnloaded<NiCutoffVtg||vtgBatUnloaded>LiChargedVtg)
+       {BatteryType=BAT_UNREC; DischargeAllowed=false;BatTypeString="UNKNOWN bat   ";}
+ }
